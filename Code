@@ -1,0 +1,486 @@
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(patchwork)
+library(cowplot)
+library(stats)
+library(gplots)
+library(ggplot2)
+library(graphics)
+library(plotly)
+library(SeuratObject)
+library(htmlwidgets)
+library(plotly)
+library(RColorBrewer)
+library(biomaRt)
+
+#choose directory with files
+setwd("C:/Users/beatr/Desktop/Mestrado/Semestre1/Project")
+
+
+#Set values for cut-offs
+mit_threshold = 20
+nFeature_threshold = 300
+nCount_threshold = 500
+
+
+##Create a new file with the barcodes ordered by well
+ordered_barcodes <- read.table("./barcodes.tsv")
+ordered_barcodes <- ordered_barcodes[-1,]
+ordered_barcodes <- ordered_barcodes[order(ordered_barcodes$V1),]
+ordered_barcodes_numb <- data.frame(ordered_barcodes[, 2]) #save the number of the well
+dim(ordered_barcodes_numb) #check all 384 were kept
+ordered_barcodes_id <- data.frame(ordered_barcodes[, 3]) #save the coordinates of the well
+dim(ordered_barcodes_id) #check all 384 were kept
+write.table(ordered_barcodes_numb, file = "./barcodes_wells.tsv", sep = "\t", quote = FALSE, 
+            row.names = FALSE, col.names = FALSE)
+wells_numb <- as.vector(read.table("./barcodes_wells.tsv"))
+write.table(ordered_barcodes_id, file = "./IDs_wells.tsv", sep = "\t", quote = FALSE, 
+            row.names = FALSE, col.names = FALSE)
+wells_id <- as.vector(read.table("./IDs_wells.tsv"))
+
+
+#Load the libraries
+h_s21_data <- Read10X(data.dir = "./Human/CHA-VP-s021-raw")
+h_s22_data <- Read10X(data.dir = "./Human/CHA-VP-s022-raw")
+
+z_s21_data <- Read10X(data.dir = "./Zebrafish/CHA-VP-s021-raw")
+z_s22_data <- Read10X(data.dir = "./Zebrafish/CHA-VP-s022-raw")
+#note: all the matrixes have 384 cols because that is the number of wells in the plates (16 x 24 aka A-P x 1-24)
+
+
+#Create the Seurat objects
+h_s21 <- CreateSeuratObject(counts = h_s21_data, project = "human_s021")
+h_s22 <- CreateSeuratObject(counts = h_s22_data, project = "human_s022")
+#human objects have 36693 features across 384 samples
+
+
+z_s21 <- CreateSeuratObject(counts = z_s21_data, project = "zebrafish_s021")
+z_s22 <- CreateSeuratObject(counts = z_s22_data, project = "zebrafish_s022")
+#zebrafish objects have 27863 features across 384 samples
+
+
+#Re-order the data
+h_s21 <- AddMetaData(h_s21, wells_numb$V1, col.name = "Well_Numb")
+h_s21 <- AddMetaData(h_s21, wells_id$V1, col.name = "Well_ID")
+h_s22 <- AddMetaData(h_s22, wells_numb$V1, col.name = "Well_Numb")
+h_s22 <- AddMetaData(h_s22, wells_id$V1, col.name = "Well_ID")
+
+z_s21 <- AddMetaData(z_s21, wells_numb$V1, col.name = "Well_Numb")
+z_s21 <- AddMetaData(z_s21, wells_id$V1, col.name = "Well_ID")
+z_s22 <- AddMetaData(z_s22, wells_numb$V1, col.name = "Well_Numb")
+z_s22 <- AddMetaData(z_s22, wells_id$V1, col.name = "Well_ID")
+
+
+#Remove empty wells
+selected_cells_1 <- c(1:288, 299:312)
+selected_cells_2 <- c(1:216, 221:240)
+
+#h_s21
+h_s21_new <- h_s21[, h_s21$Well_Numb == selected_cells_1[1]]
+for (i in selected_cells_1[-1]) {
+  cell <- h_s21[, h_s21$Well_Numb == i]
+  h_s21_new <- merge(h_s21_new, cell)
+}
+h_s21 <- h_s21_new
+h_s21 #302 cells
+
+#h_s22
+h_s22_new <- h_s22[, h_s22$Well_Numb == selected_cells_2[1]]
+for (i in selected_cells_2[-1]) {
+  cell <- h_s22[, h_s22$Well_Numb == i]
+  h_s22_new <- merge(h_s22_new, cell)}
+h_s22 <- h_s22_new
+h_s22 #236 cells
+
+#z_s21
+z_s21_new <- z_s21[, z_s21$Well_Numb == selected_cells_1[1]]
+for (i in selected_cells_1[-1]) {
+  cell <- z_s21[, z_s21$Well_Numb == i]
+  z_s21_new <- merge(z_s21_new, cell)}
+z_s21 <- z_s21_new
+z_s21 #302 cells
+
+#z_s22
+z_s22_new <- z_s22[, z_s22$Well_Numb == selected_cells_2[1]]
+for (i in selected_cells_2[-1]) {
+  cell <- z_s22[, z_s22$Well_Numb == i]
+  z_s22_new <- merge(z_s22_new, cell)}
+z_s22 <- z_s22_new
+z_s22 #236 cells left
+
+#Assign cell identities
+assign_cell_ident <- function(h_plate, z_plate ){
+  table <- data.frame(well_numb = rep(NA, length(h_plate$nFeature_RNA)),
+                      well_id = rep(NA, length(h_plate$nFeature_RNA)),
+                      h_count = rep(NA, length(h_plate$nFeature_RNA)), 
+                      z_count = rep(NA, length(h_plate$nFeature_RNA)))
+  for (i in 1:length(h_plate$nFeature_RNA)){
+    h_count = unname(h_plate$nFeature_RNA[i])
+    z_count = unname(z_plate$nFeature_RNA[i])
+    well_numb = unname(h_plate$Well_Numb[i])
+    well_id = unname(h_plate$Well_ID[i])
+    count_dif = abs(h_count - z_count)
+    table$well_id[i] <- well_id
+    table$well_numb[i] <- well_numb
+    table$h_count[i] <- h_count
+    table$z_count[i] <- z_count
+    table$count_dif[i] <- count_dif
+    if (h_count > z_count){
+      table$cell_ident[i] <- "human"
+    } else{
+      table$cell_ident[i] <- "zebrafish"
+    }
+  
+  }
+  return(table)}
+
+##s22
+s22_idents <- assign_cell_ident(h_s22, z_s22)
+table(s22_idents$cell_ident) #there are 17 human and 219 zebrafish cells
+
+##s21
+s21_idents <- assign_cell_ident(h_s21, z_s21)
+table(s21_idents$cell_ident) #there are 39 human and 263 zebrafish cells
+
+
+#Merge human and zebrafish data of all plates
+#create a column in metadata with the corresponding cell identity
+h_s21 <- AddMetaData(h_s21, s21_idents$cell_ident, col.name = "Cell_ID")
+h_s22 <- AddMetaData(h_s22, s22_idents$cell_ident, col.name = "Cell_ID")
+
+z_s21 <- AddMetaData(z_s21, s21_idents$cell_ident, col.name = "Cell_ID")
+z_s22 <- AddMetaData(z_s22, s22_idents$cell_ident, col.name = "Cell_ID")
+
+#Subset Seurat to keep only the real human/zebrafish cells in the corresponding objects
+h_s21_true <- subset(h_s21, subset = Cell_ID == "human") #39 cells
+h_s22_true <- subset(h_s22, subset = Cell_ID == "human") #17 cells
+
+z_s21_true <- subset(z_s21, subset = Cell_ID == "zebrafish") #263 cells
+z_s22_true <- subset(z_s22, subset = Cell_ID == "zebrafish") #219 cells
+
+#Merge the two plates to create just two Seurat objects, for human and zebrafish data
+h_seq <- merge(h_s21_true, y = h_s22_true, project = "Human_RNAseq")
+h_seq #56
+table(h_seq$orig.ident)
+
+z_seq <- merge(z_s21_true, y = z_s22_true, project = "Zebrafish_RNAseq")
+z_seq #482
+table(z_seq$orig.ident)
+
+
+###Quality Control Analysis####
+#nFeature_RNA is number of genes detected in each cell (low = dying cells or empty droplets; high = multiplets)
+#nCount_RNA is total number of molecules detected (UMIs)
+#percent.mt is percentage of mitochondrial genes (high = dying cells)
+
+##Human Data
+h_seq[["percent.mt"]] <- PercentageFeatureSet(h_seq, pattern = "^MT-")
+head(h_seq@meta.data, 2)
+##Zebrafish Data
+z_seq[["percent.mt"]] <- PercentageFeatureSet(z_seq, pattern = "^mt-")
+head(z_seq@meta.data, 2)
+
+
+#check the distribution of the metrics across the 2 plates
+VlnPlot(h_seq, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, group.by = "orig.ident",
+        pt.size = 0.5)
+VlnPlot(z_seq, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, group.by = "orig.ident",
+        pt.size = 0.5)
+
+
+#Arrange the x axis of the plots for figure; red dot represents mean
+#create a new metadata column with custom labels
+h_seq$custom_label <- factor(h_seq$orig.ident, levels = c("human_s021", "human_s022"),
+                             labels = c("s21_live_4dpi", "s22_acme_4dpi"))
+z_seq$custom_label <- factor(z_seq$orig.ident, levels = c("zebrafish_s021", "zebrafish_s022"),
+                             labels = c("s21_live_4dpi", "s22_acme_4dpi"))
+
+#Human
+p1_h <- VlnPlot(h_seq, features = "nFeature_RNA", group.by = "custom_label", pt.size = 0.5, y.max = 5000) +
+  geom_hline(yintercept = nFeature_threshold) + labs(title = "nFeature_RNA", x = "Assay Plate", y = "Genes (#)") +
+  stat_summary(fun = mean, geom = "point", colour = "red")
+p2_h <- VlnPlot(h_seq, features = "nCount_RNA", group.by = "custom_label", pt.size = 0.5, y.max = 11000) +
+  geom_hline(yintercept = nCount_threshold) + labs(title = "nCount_RNA", x = "Assay Plate", y = "UMIs (#)") +
+  stat_summary(fun = mean, geom = "point", colour = "red")
+p3_h <- VlnPlot(h_seq, features = "percent.mt", group.by = "custom_label", pt.size = 0.5, y.max = 40) +
+  geom_hline(yintercept = mit_threshold) + labs(title = "percent.mt", x = "Assay Plate", y = "Mitochondrial transcripts (%)") +
+  stat_summary(fun = mean, geom = "point", colour = "red")
+
+p1_nl_h <- p1_h + theme(legend.position = "none", axis.title.x = element_blank())
+p2_nl_h <- p2_h + theme(legend.position = "none", axis.title.x = element_blank())
+p3_nl_h <- p3_h + theme(legend.position = "none", axis.title.x = element_blank())
+
+h_before_qc <- plot_grid(p1_nl_h, p2_nl_h, p3_nl_h, ncol = 3)
+h_before_qc
+
+#Zebrafish
+p1_z <- VlnPlot(z_seq, features = "nFeature_RNA", group.by = "custom_label", pt.size = 0.5) +
+  geom_hline(yintercept = nFeature_threshold) + labs(title = "nFeature_RNA", x = "Assay Plate", y = "Genes (#)") +
+  stat_summary(fun = mean, geom = "point", colour = "red")
+p2_z <- VlnPlot(z_seq, features = "nCount_RNA", group.by = "custom_label", pt.size = 0.5) +
+  geom_hline(yintercept = nCount_threshold) + labs(title = "nCount_RNA", x = "Assay Plate", y = "UMIs (#)") +
+  stat_summary(fun = mean, geom = "point", colour = "red")
+p3_z <- VlnPlot(z_seq, features = "percent.mt", group.by = "custom_label", pt.size = 0.5) +
+  geom_hline(yintercept = mit_threshold) + labs(title = "percent.mt", x = "Assay Plate", y = "Mitochondrial transcripts (%)") +
+  stat_summary(fun = mean, geom = "point", colour = "red")
+
+p1_nl_z <- p1_z + theme(legend.position = "none", axis.title.x = element_blank())
+p2_nl_z <- p2_z + theme(legend.position = "none", axis.title.x = element_blank())
+p3_nl_z <- p3_z + theme(legend.position = "none", axis.title.x = element_blank())
+
+z_before_qc <- plot_grid(p1_nl_z, p2_nl_z, p3_nl_z, ncol = 3)
+z_before_qc
+
+
+# Check number of cells after possible filters
+subset(x = subset(h_seq, subset = percent.mt < mit_threshold), idents = c("human_s021")) #35
+subset(x = subset(h_seq, subset = percent.mt < mit_threshold), idents = c("human_s022")) #16
+
+subset(x = subset(h_seq, subset = nFeature_RNA > nFeature_threshold & nCount_RNA > nCount_threshold), idents = c("human_s021")) #8
+subset(x = subset(h_seq, subset = nFeature_RNA > nFeature_threshold & nCount_RNA > nCount_threshold), idents = c("human_s022")) #13
+
+subset(x = subset(z_seq, subset = percent.mt < mit_threshold), idents = c("zebrafish_s021")) #262
+subset(x = subset(z_seq, subset = percent.mt < mit_threshold), idents = c("zebrafish_s022")) #216
+
+subset(x = subset(z_seq, subset = nFeature_RNA > nFeature_threshold & nCount_RNA > nCount_threshold), idents = c("zebrafish_s021")) #174
+subset(x = subset(z_seq, subset = nFeature_RNA > nFeature_threshold & nCount_RNA > nCount_threshold), idents = c("zebrafish_s022")) #213
+
+
+# Filtering the data to not include empty droplets or dying cells (apply quality control filter)
+h_seq_sub <- subset(h_seq, subset = nFeature_RNA > nFeature_threshold & nCount_RNA > nCount_threshold & percent.mt < mit_threshold) #18 remaining -> two plates together
+
+h_filt_21 <- subset(x = h_seq_sub, idents = c("human_s021"))
+h_filt_21 #6 cells remaining
+h_filt_22 <- subset(x = h_seq_sub, idents = c("human_s022"))
+h_filt_22 #12 cells remaining
+
+z_seq_sub <- subset(z_seq, subset = nFeature_RNA > nFeature_threshold & nCount_RNA > nCount_threshold & percent.mt < mit_threshold) #385 remaining -> two plates together
+
+z_filt_21 <- subset(x = z_seq_sub, idents = c("zebrafish_s021"))
+z_filt_21 #174 cells remaining
+z_filt_22 <- subset(x = z_seq_sub, idents = c("zebrafish_s022"))
+z_filt_22 #211 cells remaining
+
+
+#Check metrics after applying the QC filters
+VlnPlot(h_seq_sub, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, group.by = "orig.ident",
+        pt.size = 0.5)
+VlnPlot(z_seq_sub, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, group.by = "orig.ident",
+        pt.size = 0.5)
+
+
+#Arrange the plots for the figure
+h_seq_sub$custom_label <- factor(h_seq_sub$orig.ident, levels = c("human_s021", "human_s022"),
+                                       labels = c("s21_live_4dpi", "s22_acme_4dpi"))
+z_seq_sub$custom_label <- factor(z_seq_sub$orig.ident, levels = c("zebrafish_s021", "zebrafish_s022"),
+                                 labels = c("s21_live_4dpi", "s22_acme_4dpi"))
+
+
+# VlnPlot with custom group labels
+
+#Human
+p1_qc_h <- VlnPlot(h_seq_sub, features = "nFeature_RNA", group.by = "custom_label", pt.size = 0.5, y.max = 5000) +
+  labs(title = "nFeature_RNA", x = "Assay Plate", y = "Genes (#)")
+p2_qc_h <- VlnPlot(h_seq_sub, features = "nCount_RNA", group.by = "custom_label", pt.size = 0.5, y.max = 12000) +
+  labs(title = "nCount_RNA", x = "Assay Plate", y = "UMIs (#)")
+p3_qc_h <- VlnPlot(h_seq_sub, features = "percent.mt", group.by = "custom_label", pt.size = 0.5) +
+  labs(title = "percent.mt", x = "Assay Plate", y = "Mitochondrial transcripts (%)")
+
+p1_qc_nl_h <- p1_qc_h + theme(legend.position = "none", axis.title.x = element_blank())
+p2_qc_nl_h <- p2_qc_h + theme(legend.position = "none", axis.title.x = element_blank())
+p3_qc_nl_h <- p3_qc_h + theme(legend.position = "none", axis.title.x = element_blank())
+
+h_after_qc <- plot_grid(p1_qc_nl_h, p2_qc_nl_h, p3_qc_nl_h, ncol = 3)
+h_after_qc
+
+#Zebrafish
+p1_qc_z <- VlnPlot(z_seq_sub, features = "nFeature_RNA", group.by = "custom_label", pt.size = 0.5) +
+  labs(title = "nFeature_RNA", x = "Assay Plate", y = "Genes (#)")
+p2_qc_z <- VlnPlot(z_seq_sub, features = "nCount_RNA", group.by = "custom_label", pt.size = 0.5) +
+  labs(title = "nCount_RNA", x = "Assay Plate", y = "UMIs (#)")
+p3_qc_z <- VlnPlot(z_seq_sub, features = "percent.mt", group.by = "custom_label", pt.size = 0.5) +
+  labs(title = "percent.mt", x = "Assay Plate", y = "Mitochondrial transcripts (%)")
+
+p1_qc_nl_z <- p1_qc_z + theme(legend.position = "none", axis.title.x = element_blank())
+p2_qc_nl_z <- p2_qc_z + theme(legend.position = "none", axis.title.x = element_blank())
+p3_qc_nl_z <- p3_qc_z + theme(legend.position = "none", axis.title.x = element_blank())
+
+z_after_qc_z <- plot_grid(p1_qc_nl_z, p2_qc_nl_z, p3_qc_nl_z, ncol = 3)
+z_after_qc_z
+
+
+####Plots####
+
+#Scatter plots of the amount of human vs zebrafish genes by cell identity in all plates
+##s22
+keepers_22 <- c(unname(h_filt_22$Well_Numb), unname(z_filt_22$Well_Numb))
+s22_idents_keepers <- s22_idents[s22_idents$well_numb %in% keepers_22, ]
+s22_idents_filtered <- s22_idents[!(s22_idents$well_numb %in% keepers_22), ]
+
+scatter_plot22 <- plot_ly() %>%
+  add_trace(data = s22_idents_keepers[s22_idents_keepers$cell_ident == "human", ],
+            x = ~z_count, 
+            y = ~h_count,
+            type = "scatter",
+            mode = "markers",
+            marker = list(color = "steelblue"),
+            name = "Human") %>%
+  add_trace(data = s22_idents_keepers[s22_idents_keepers$cell_ident == "zebrafish", ],
+            x = ~z_count,
+            y = ~h_count,
+            type = "scatter",
+            mode = "markers",
+            marker = list(color = "indianred"),
+            name = "Zebrafish") %>%
+  add_trace(data = s22_idents_filtered,
+            x = ~z_count,
+            y = ~h_count,
+            type = "scatter",
+            mode = "markers",
+            marker = list(color = "#CDC0B0"),
+            name = "Filtered cells") %>%
+  layout( title = list(
+    text = "DAPI-<br>ACME 4dpi",  # Use <br> for line break
+    x = 0.6,  # Set x to 0.5 for center alignment
+    y = 1.1,  # Adjust the y value for vertical positioning
+    xref = "paper",
+    yref = "paper",
+    showarrow = FALSE
+  ),
+  xaxis = list(title = "Zebrafish genes (#)"),
+  yaxis = list(title = "Human genes (#)"),
+  margin = list(t = 60, b = 60))
+scatter_plot22
+
+##s21
+keepers_21 <- c(unname(h_filt_21$Well_Numb), unname(z_filt_21$Well_Numb))
+s21_idents_keepers <- s21_idents[s21_idents$well_numb %in% keepers_21, ]
+s21_idents_filtered <- s21_idents[!(s21_idents$well_numb %in% keepers_21), ]
+
+scatter_plot21 <- plot_ly() %>%
+  add_trace(data = s21_idents_keepers[s21_idents_keepers$cell_ident == "human", ],
+            x = ~z_count, 
+            y = ~h_count,
+            type = "scatter",
+            mode = "markers",
+            marker = list(color = "steelblue"),
+            name = "Human") %>%
+  add_trace(data = s21_idents_keepers[s21_idents_keepers$cell_ident == "zebrafish", ],
+            x = ~z_count,
+            y = ~h_count,
+            type = "scatter",
+            mode = "markers",
+            marker = list(color = "indianred"),
+            name = "Zebrafish") %>%
+  add_trace(data = s21_idents_filtered,
+            x = ~z_count,
+            y = ~h_count,
+            type = "scatter",
+            mode = "markers",
+            marker = list(color = "#CDC0B0"),
+            name = "Filtered cells") %>%
+  layout( title = list(
+    text = "DAPI-<br>live 4dpi",  # Use <br> for line break
+    x = 0.6,  # Set x to 0.5 for center alignment
+    y = 1.1,  # Adjust the y value for vertical positioning
+    xref = "paper",
+    yref = "paper",
+    showarrow = FALSE
+  ),
+  xaxis = list(title = "Zebrafish genes (#)"),
+  yaxis = list(title = "Human genes (#)"),
+  margin = list(t = 60, b = 60))
+scatter_plot21
+
+
+#Barplot to summarize the frequencies of human and zebrafish genes in the two plates
+par(mfrow = c(1, 2))
+
+barplot(table(s21_idents_keepers$cell_ident), main = "s021-\nlive 4dpi", col = c("steelblue", "indianred"), ylim = c(0,240), cex.main = 1.45)
+text(x = 1.26, y = 225, labels = paste0("human cells: ", unname(table(s21_idents_keepers$cell_ident)[1])), pos = 3, cex = 0.9)
+text(x = 1.26, y = 210, labels = paste0("zebrafish cells: ", unname(table(s21_idents_keepers$cell_ident)[2])), pos = 3, cex = 0.9)
+
+barplot(table(s22_idents_keepers$cell_ident), main = "s022-\nACME 4dpi", col = c("steelblue", "indianred"), ylim = c(0,240), cex.main = 1.45)
+text(x = 1.26, y = 225, labels = paste0("human cells: ", unname(table(s22_idents_keepers$cell_ident)[1])), pos = 3, cex = 0.9)
+text(x = 1.26, y = 210, labels = paste0("zebrafish cells: ", unname(table(s22_idents_keepers$cell_ident)[2])), pos = 3, cex = 0.9)
+
+
+
+###Clustering###
+
+#Color Palette
+cluster_cols <- brewer.pal(11, "Set3")[3:9]
+
+#Normalizing the data
+z_seq_sub <- NormalizeData(z_seq_sub, normalization.method = "LogNormalize", scale.factor = 10000)
+
+#Feature Selection
+z_seq_sub <- FindVariableFeatures(z_seq_sub, selection.method = "vst", nfeatures = 2000)
+
+#Scaling the data
+all.genes_z <- rownames(z_seq_sub)
+z_seq_sub <- ScaleData(z_seq_sub, features = all.genes_z)
+
+#Linear Dimensional Reduction - Principal Component Analysis (PCA)
+z_seq_sub <- RunPCA(z_seq_sub, features = VariableFeatures(object = z_seq_sub))
+
+#Determine the dimensionality of the dataset
+elbow_z <- ElbowPlot(z_seq_sub, ndims=50)
+elbow_z
+
+#Cluster the cells
+z_seq_sub <- FindNeighbors(z_seq_sub, dims = 1:25)
+z_seq_sub <- FindClusters(z_seq_sub, resolution = 0.5)
+head(Idents(z_seq_sub), 5) #há 5 PCs
+
+pcaz_1_2 <- DimPlot(z_seq_sub, reduction = "pca", cols = cluster_cols)
+pcaz_2_3 <- DimPlot(z_seq_sub, reduction = "pca", dims = c(2,3), cols = cluster_cols)
+ggdraw() +
+  draw_plot(elbow_z, x = 0, y = 0, width = 0.33, height = 1) +
+  draw_plot(pcaz_1_2, x = 0.33, y = 0, width = 0.33, height = 1) +
+  draw_plot(pcaz_2_3, x = 0.66, y = 0, width = 0.33, height = 1) +
+  draw_plot_label(label = c("A", "B", "C"), size = 15, x = c(0, 0.33, 0.66), y = c(1, 1, 1))
+
+
+#Non-linear Dimensional Reduction - UMAP
+z_seq_sub <- RunUMAP(z_seq_sub, dims = 1:30)
+
+#UMAP by plate
+DimPlot(z_seq_sub, reduction = "umap", group.by = "custom_label", pt.size = 1.5) +
+  ggtitle("")
+
+#UMAP by cluster
+DimPlot(z_seq_sub, reduction = "umap", pt.size = 1.5, label = T)
+
+#Find the genes that are more expressed in each cluster
+z_seq_sub.markers <- FindAllMarkers(z_seq_sub, only.pos = TRUE)
+z_seq_sub.markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 1)
+
+z_seq_sub.markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 1) %>%
+  slice_head(n = 10) %>%
+  ungroup() -> top10
+DoHeatmap(z_seq_sub, features = top10$gene)
+
+
+cluster0.markers <- FindMarkers(z_seq_sub, ident.1 = 0)
+head(cluster0.markers, n = 10)
+
+cluster1.markers <- FindMarkers(z_seq_sub, ident.1 = 1)
+head(cluster1.markers, n = 10)
+
+cluster2.markers <- FindMarkers(z_seq_sub, ident.1 = 2)
+head(cluster2.markers, n = 10)
+
+cluster3.markers <- FindMarkers(z_seq_sub, ident.1 = 3)
+head(cluster3.markers, n = 10)
+
+cluster4.markers <- FindMarkers(z_seq_sub, ident.1 = 4)
+head(cluster4.markers, n = 10)
+
+cluster5.markers <- FindMarkers(z_seq_sub, ident.1 = 5)
+head(cluster5.markers, n = 10)
